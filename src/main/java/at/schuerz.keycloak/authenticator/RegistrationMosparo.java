@@ -17,6 +17,9 @@
 
 package at.schuerz.keycloak.authenticator;
 
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import org.apache.commons.collections4.MultiValuedMap;
+import org.apache.commons.collections4.multimap.ArrayListValuedHashMap;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
 import org.apache.http.client.methods.HttpPost;
@@ -47,6 +50,9 @@ import org.keycloak.util.JsonSerialization;
 
 import java.io.InputStream;
 import jakarta.ws.rs.core.MultivaluedMap;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
@@ -65,9 +71,13 @@ import org.apache.http.util.EntityUtils;
 public class RegistrationMosparo implements FormAction, FormActionFactory {
     public static final String MOSPARO_RESPONSE = "mosparo-response";
     public static final String MOSPARO_REFERENCE_CATEGORY = "mosparo";
-    public static final String SITE_PUBKEY = "mosparo-public-key";
-    public static final String SITE_UUID = "uuid";
+
     public static final String MOSPARO_HOST = "hostname";
+    public static final String MOSPARO_UUID = "uuid";
+    public static final String MOSPARO_PUBLIC_KEY = "mosparo-public-key";
+    public static final String MOSPARO_PRIVATE_KEY = "mosparo-private-key";
+    public static final String MOSPARO_VERIFY_SSL = "mosparo-verify-ssl";
+
     private static final Logger logger = Logger.getLogger(RegistrationMosparo.class);
 
     public static final String PROVIDER_ID = "registration-mosparo-action";
@@ -91,31 +101,32 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
             AuthenticationExecutionModel.Requirement.REQUIRED,
             AuthenticationExecutionModel.Requirement.DISABLED
     };
+
     @Override
     public AuthenticationExecutionModel.Requirement[] getRequirementChoices() {
         return REQUIREMENT_CHOICES;
     }
+
     @Override
     public void buildPage(FormContext context, LoginFormsProvider form) {
         AuthenticatorConfigModel captchaConfig = context.getAuthenticatorConfig();
-        String userLanguageTag = context.getSession().getContext().resolveLocale(context.getUser()).toLanguageTag();
         if (captchaConfig == null || captchaConfig.getConfig() == null
-                || captchaConfig.getConfig().get(SITE_UUID) == null
-                || captchaConfig.getConfig().get(SITE_PUBKEY) == null
                 || captchaConfig.getConfig().get(MOSPARO_HOST) == null
+                || captchaConfig.getConfig().get(MOSPARO_UUID) == null
+                || captchaConfig.getConfig().get(MOSPARO_PUBLIC_KEY) == null
+                || captchaConfig.getConfig().get(MOSPARO_PRIVATE_KEY) == null
                 ) {
-            form.addError(new FormMessage(null, "Mosparo not configured properly."));
+            form.addError(new FormMessage(null, "mosparo not configured properly."));
             return;
         }
-        String siteUUID = captchaConfig.getConfig().get(SITE_UUID);
-        form.addScript("https://" + getMosparoHostname(captchaConfig) + "/build/mosparo-frontend.js");
-        form.addScript( "var m; " +
-                "window.onload = function(){ " +
-                "m = new mosparo( " +
-                "'mosparo-box'," +
-                " captchaConfig.getConfig().get(MOSPARO_HOST)," +
-                " captchaConfig.getConfig().get(SITE_UUID)," +
-                " captchaConfig.getConfig().get(SITE_PUBKEY)); };");
+
+        form.setAttribute("mosparoRequired", true);
+        form.setAttribute("mosparoHost", captchaConfig.getConfig().get(MOSPARO_HOST));
+        form.setAttribute("mosparoUuid", captchaConfig.getConfig().get(MOSPARO_UUID));
+        form.setAttribute("mosparoPublicKey", captchaConfig.getConfig().get(MOSPARO_PUBLIC_KEY));
+
+        // The hostname should always start with https://
+        form.addScript(getMosparoHostname(captchaConfig) + "/build/mosparo-frontend.js");
     }
 
     @Override
@@ -125,13 +136,8 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
         boolean success = false;
         context.getEvent().detail(Details.REGISTER_METHOD, "form");
 
-        String captcha = formData.getFirst(MOSPARO_RESPONSE);
-        if (!Validation.isBlank(captcha)) {
-            AuthenticatorConfigModel captchaConfig = context.getAuthenticatorConfig();
-            String pubkey = captchaConfig.getConfig().get(SITE_PUBKEY);
+        success = verifyFormData(context, formData);
 
-            success = validateMosparo(context, success, captcha, pubkey);
-        }
         if (success) {
             context.success();
         } else {
@@ -141,20 +147,54 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
             context.validationError(formData, errors);
             context.excludeOtherErrors();
             return;
-
-
         }
     }
 
     private String getMosparoHostname(AuthenticatorConfigModel config) {
-			
-				System.out.println(MOSPARO_HOST);
-				return config.getConfig().get(MOSPARO_HOST);
+        return config.getConfig().get(MOSPARO_HOST);
     }
 
-    protected boolean validateMosparo(ValidationContext context, boolean success, String captcha, String pubkey) {
-        CloseableHttpClient httpClient = context.getSession().getProvider(HttpClientProvider.class).getHttpClient();
-        HttpPost post = new HttpPost("https://" + getMosparoHostname(context.getAuthenticatorConfig()) + "/api/v1/frontend/verification/verify");
+    protected boolean validateMosparo(ValidationContext context, MultivaluedMap<String, String> formData) {
+        // 1. Remove the ignored fields from the form data
+        formData.remove("password");
+        formData.remove("password-confirm");
+
+        // 2. Extract the submit and validation token from the form data
+        String mosparoSubmitToken = formData.getFirst("_mosparo_submitToken");
+        String mosparoValidationToken = formData.getFirst("_mosparo_validationToken");
+
+        // 3. Prepare the form data
+        MultivaluedMap<String, String> preparedFormData = new MultivaluedHashMap<>();
+        for (Map.Entry<String, List<String>> entry : formData.entrySet()) {
+            if (entry.getKey().startsWith("_mosparo_")) {
+                continue;
+            }
+
+            String value = entry.getValue().getFirst();
+            preparedFormData.add(entry.getKey(), value.replace("\r\n", "\n"));
+        }
+
+        // 4. Generate the hashes
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        MultivaluedMap<String, String> hashedFormData = new MultivaluedHashMap<>();
+        for (Map.Entry<String, List<String>> entry : preparedFormData.entrySet()) {
+            String value = entry.getValue().getFirst();
+            byte[] hashedValue = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+            hashedFormData.add(entry.getKey(), convertBytesToHex(hashedValue));
+        }
+
+        // 5. Generate the form data signature
+        // 6. Generate the validation signature
+        // 7. Prepare the verification signature
+        // 8. Collect the request data
+        // 9. Generate the request signature
+        // 10. Send the API request
+        // 11. Check the response
+
+        boolean success = false;
+        /*CloseableHttpClient httpClient = context.getSession().getProvider(HttpClientProvider.class).getHttpClient();
+        HttpPost post = new HttpPost(getMosparoHostname(context.getAuthenticatorConfig()) + "/api/v1/verification/verify");
+
         List<NameValuePair> formparams = new LinkedList<>();
         formparams.add(new BasicNameValuePair("pubkey", pubkey));
         formparams.add(new BasicNameValuePair("response", captcha));
@@ -174,8 +214,23 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
             }
         } catch (Exception e) {
             ServicesLogger.LOGGER.recaptchaFailed(e);
-        }
+        }*/
         return success;
+    }
+
+    private static String convertBytesToHex(byte[] hash) {
+        StringBuilder hexString = new StringBuilder(2 * hash.length);
+        for (int i = 0; i < hash.length; i++) {
+            String hex = Integer.toHexString(0xff & hash[i]);
+
+            if (hex.length() == 1) {
+                hexString.append('0');
+            }
+
+            hexString.append(hex);
+        }
+
+        return hexString.toString();
     }
 
     @Override
@@ -238,24 +293,40 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
 
     static {
         ProviderConfigProperty property;
-        property = new ProviderConfigProperty();
-        property.setName(SITE_UUID);
-        property.setLabel("UUID");
-        property.setType(ProviderConfigProperty.STRING_TYPE);
-        property.setHelpText("UUID");
-        CONFIG_PROPERTIES.add(property);
-        property = new ProviderConfigProperty();
-        property.setName(SITE_PUBKEY);
-        property.setLabel("Mosparo Public Key");
-        property.setType(ProviderConfigProperty.STRING_TYPE);
-        property.setHelpText("Mosparo Public Key (Site Key)");
-        CONFIG_PROPERTIES.add(property);
 
         property = new ProviderConfigProperty();
         property.setName(MOSPARO_HOST);
         property.setLabel("Hostname");
         property.setType(ProviderConfigProperty.STRING_TYPE);
         property.setHelpText("Hostname mosparo-host");
+        CONFIG_PROPERTIES.add(property);
+
+        property = new ProviderConfigProperty();
+        property.setName(MOSPARO_UUID);
+        property.setLabel("UUID");
+        property.setType(ProviderConfigProperty.STRING_TYPE);
+        property.setHelpText("UUID");
+        CONFIG_PROPERTIES.add(property);
+
+        property = new ProviderConfigProperty();
+        property.setName(MOSPARO_PUBLIC_KEY);
+        property.setLabel("mosparo Public Key");
+        property.setType(ProviderConfigProperty.STRING_TYPE);
+        property.setHelpText("Mosparo Public Key (Site Key)");
+        CONFIG_PROPERTIES.add(property);
+
+        property = new ProviderConfigProperty();
+        property.setName(MOSPARO_PRIVATE_KEY);
+        property.setLabel("mosparo Private Key");
+        property.setType(ProviderConfigProperty.STRING_TYPE);
+        property.setHelpText("mosparo Private Key");
+        CONFIG_PROPERTIES.add(property);
+
+        property = new ProviderConfigProperty();
+        property.setName(MOSPARO_VERIFY_SSL);
+        property.setLabel("mosparo Verify SSL");
+        property.setType(ProviderConfigProperty.BOOLEAN_TYPE);
+        property.setHelpText("mosparo Verify SSL");
         CONFIG_PROPERTIES.add(property);
     }
 

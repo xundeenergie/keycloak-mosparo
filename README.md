@@ -34,12 +34,25 @@ Authorizing Iframes
 To show the hCaptcha you need to modify the registration template. You can find the files in your Keycloak installation under `themes/base/login/`. If you use the user profile preview (you start your Keycloak with the `-Dkeycloak.profile=preview` flag), you need to edit the `register-user-profile.ftl`, else the `register.ftl`. Add the following code beneith the reCaptcha code:
 
 ```html
-<#if hcaptchaRequired??>
-    <div class="form-group">
-        <div class="${properties.kcInputWrapperClass!}">
-            <div class="h-captcha" data-size="<#if hcaptchaCompact?? && hcaptchaCompact=="true">compact<#else>normal</#if>" data-sitekey="${hcaptchaSiteKey}"></div>
-        </div>
+<#if mosparoRequired??>
+<div class="form-group">
+    <div class="${properties.kcInputWrapperClass!}">
+        <div id="mosparo-box"></div>
+
+        <script type="module">
+            var m;
+            window.onload = function(){
+                m = new mosparo(
+                   'mosparo-box', 
+                   '${mosparoHost}', 
+                   '${mosparoUuid}',
+                   '${mosparoPublicKey}', 
+                   { loadCssResource: true }
+                );
+            };
+        </script>
     </div>
+</div>
 </#if>
 ```
 
