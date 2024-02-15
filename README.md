@@ -1,3 +1,8 @@
+# THIS IS A FIRST SHOT AND NOT WORKING!!!
+Just a fork from keycloak-hcaptcha to be modified for mosparo
+
+# ADVISORY: DO NOT USE THIS NOW!!!
+
 # keycloak-hcaptcha
 
 > I am currently not adding any new features, updates or fixes. Feel free to open a PR!
