@@ -17,13 +17,21 @@
 
 package at.schuerz.keycloak.authenticator;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.ws.rs.core.MultivaluedHashMap;
-import org.apache.commons.collections4.MultiValuedMap;
-import org.apache.commons.collections4.multimap.ArrayListValuedHashMap;
+import org.apache.commons.codec.binary.Hex;
+import org.apache.http.HeaderElement;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
+import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpPost;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
 import org.apache.http.message.BasicNameValuePair;
+import org.apache.http.ssl.SSLContextBuilder;
+import org.apache.http.ssl.TrustStrategy;
+import org.apache.http.util.EntityUtils;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
 import org.keycloak.authentication.FormAction;
@@ -41,26 +49,21 @@ import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.FormMessage;
-import org.keycloak.provider.ConfiguredProvider;
 import org.keycloak.provider.ProviderConfigProperty;
-import org.keycloak.services.ServicesLogger;
-import org.keycloak.services.messages.Messages;
-import org.keycloak.services.validation.Validation;
 import org.keycloak.util.JsonSerialization;
 
-import java.io.InputStream;
+import java.io.IOException;
 import jakarta.ws.rs.core.MultivaluedMap;
 
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.util.ArrayList;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.util.EntityUtils;
+import java.security.*;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
+import java.util.*;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * @author <a href="mailto:bill@burkecentral.com">Bill Burke</a>
@@ -81,6 +84,8 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
     private static final Logger logger = Logger.getLogger(RegistrationMosparo.class);
 
     public static final String PROVIDER_ID = "registration-mosparo-action";
+
+    private Mac mHmacSha256;
 
     @Override
     public String getDisplayType() {
@@ -136,17 +141,20 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
         boolean success = false;
         context.getEvent().detail(Details.REGISTER_METHOD, "form");
 
-        success = verifyFormData(context, formData);
+        try {
+            success = verifyFormData(context, formData);
+        } catch (NoSuchAlgorithmException | IOException | InvalidKeyException e) {
+            throw new RuntimeException(e);
+        }
 
         if (success) {
             context.success();
         } else {
-            errors.add(new FormMessage(null, "Mosparo verification failed."));
+            errors.add(new FormMessage(null, "mosparo verification failed."));
             formData.remove(MOSPARO_RESPONSE);
             context.error(Errors.INVALID_REGISTRATION);
             context.validationError(formData, errors);
             context.excludeOtherErrors();
-            return;
         }
     }
 
@@ -154,7 +162,13 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
         return config.getConfig().get(MOSPARO_HOST);
     }
 
-    protected boolean validateMosparo(ValidationContext context, MultivaluedMap<String, String> formData) {
+    protected boolean verifyFormData(ValidationContext context, MultivaluedMap<String, String> formData) throws NoSuchAlgorithmException, IOException, InvalidKeyException {
+        boolean success = false;
+
+        AuthenticatorConfigModel captchaConfig = context.getAuthenticatorConfig();
+        String publicKey = captchaConfig.getConfig().get(MOSPARO_PUBLIC_KEY);
+        String privateKey = captchaConfig.getConfig().get(MOSPARO_PRIVATE_KEY);
+
         // 1. Remove the ignored fields from the form data
         formData.remove("password");
         formData.remove("password-confirm");
@@ -164,58 +178,127 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
         String mosparoValidationToken = formData.getFirst("_mosparo_validationToken");
 
         // 3. Prepare the form data
-        MultivaluedMap<String, String> preparedFormData = new MultivaluedHashMap<>();
+        Map<String, String> preparedFormData = new HashMap<String, String>();
         for (Map.Entry<String, List<String>> entry : formData.entrySet()) {
             if (entry.getKey().startsWith("_mosparo_")) {
                 continue;
             }
 
             String value = entry.getValue().getFirst();
-            preparedFormData.add(entry.getKey(), value.replace("\r\n", "\n"));
+            preparedFormData.put(entry.getKey(), value.replace("\r\n", "\n"));
         }
 
         // 4. Generate the hashes
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        MultivaluedMap<String, String> hashedFormData = new MultivaluedHashMap<>();
-        for (Map.Entry<String, List<String>> entry : preparedFormData.entrySet()) {
-            String value = entry.getValue().getFirst();
+        Map<String, String> hashedFormData = new HashMap<String, String>();
+
+        // Since the data must be sorted by keys, we sort the keys and then generate the
+        // SHA256 hash for all the values
+        List<String> keylist = new ArrayList<>(preparedFormData.keySet());
+        Collections.sort(keylist);
+        for (String key : keylist) {
+            String value = preparedFormData.get(key);
             byte[] hashedValue = digest.digest(value.getBytes(StandardCharsets.UTF_8));
-            hashedFormData.add(entry.getKey(), convertBytesToHex(hashedValue));
+            hashedFormData.put(key, convertBytesToHex(hashedValue));
         }
 
         // 5. Generate the form data signature
+        String jsonHashedFormData = JsonSerialization.writeValueAsString(hashedFormData);
+        String formDataSignature = calculateHmacSignature(jsonHashedFormData, privateKey);
+
         // 6. Generate the validation signature
+        String validationSignature = calculateHmacSignature(mosparoValidationToken, privateKey);
+
         // 7. Prepare the verification signature
+        String combinedSignatures = validationSignature + formDataSignature;
+        String verificationSignature = calculateHmacSignature(combinedSignatures, privateKey);
+
         // 8. Collect the request data
+        String apiEndpoint = "/api/v1/verification/verify";
+        Map<String, Object> requestData = new HashMap<String, Object>();
+        requestData.put("submitToken", mosparoSubmitToken);
+        requestData.put("validationSignature", validationSignature);
+        requestData.put("formSignature", formDataSignature);
+        requestData.put("formData", hashedFormData);
+
         // 9. Generate the request signature
+        String jsonRequestData = JsonSerialization.writeValueAsString(requestData);
+        String combinedApiEndpointJsonRequestData = apiEndpoint + jsonRequestData;
+        String requestSignature = calculateHmacSignature(combinedApiEndpointJsonRequestData, privateKey);
+
         // 10. Send the API request
-        // 11. Check the response
+        CloseableHttpClient httpClient = context.getSession().getProvider(HttpClientProvider.class).getHttpClient();
+        if (captchaConfig.getConfig().get(MOSPARO_VERIFY_SSL) == null) {
+            try {
+                httpClient = HttpClients
+                    .custom()
+                    .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+                    .setSSLContext(new SSLContextBuilder().loadTrustMaterial(null, new TrustStrategy() {
+                        public boolean isTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {
+                            return true;
+                        }
+                    }).build()).build();
+            } catch (KeyManagementException e) {
+                logger.error("KeyManagementException for HttpClient without SSL verification");
+            } catch (NoSuchAlgorithmException e) {
+                logger.error("NoSuchAlgorithmException for HttpClient without SSL verification");
+            } catch (KeyStoreException e) {
+                logger.error("KeyStoreException for HttpClient without SSL verification");
+            }
+        }
 
-        boolean success = false;
-        /*CloseableHttpClient httpClient = context.getSession().getProvider(HttpClientProvider.class).getHttpClient();
-        HttpPost post = new HttpPost(getMosparoHostname(context.getAuthenticatorConfig()) + "/api/v1/verification/verify");
+        HttpPost post = new HttpPost(getMosparoHostname(context.getAuthenticatorConfig()) + apiEndpoint);
 
-        List<NameValuePair> formparams = new LinkedList<>();
-        formparams.add(new BasicNameValuePair("pubkey", pubkey));
-        formparams.add(new BasicNameValuePair("response", captcha));
-        formparams.add(new BasicNameValuePair("remoteip", context.getConnection().getRemoteAddr()));
+        boolean valid = false;
+        String mosparoVerificationSignature = null;
+        JsonNode verifiedFields = null;
+        JsonNode issues = null;
+
         try {
-            UrlEncodedFormEntity form = new UrlEncodedFormEntity(formparams, "UTF-8");
+            UrlEncodedFormEntity form = new UrlEncodedFormEntity(convertToNameValuePar(requestData), "UTF-8");
             post.setEntity(form);
+
+            String authHeader = publicKey + ":" + requestSignature;
+            String authHeaderEncoded = Base64.getEncoder().encodeToString(authHeader.getBytes(StandardCharsets.UTF_8));
+            post.setHeader("Authorization", "Basic " + authHeaderEncoded);
+
             try (CloseableHttpResponse response = httpClient.execute(post)) {
                 InputStream content = response.getEntity().getContent();
+
                 try {
-                    Map json = JsonSerialization.readValue(content, Map.class);
-                    Object val = json.get("success");
-                    success = Boolean.TRUE.equals(val);
+                    Map responseData = JsonSerialization.readValue(content, Map.class);
+                    valid = Boolean.TRUE.equals(responseData.get("valid"));
+                    mosparoVerificationSignature = JsonSerialization.mapper.convertValue(responseData.get("verificationSignature"), String.class);
+                    verifiedFields = JsonSerialization.mapper.convertValue(responseData.get("verifiedFields"), JsonNode.class);
+                    issues = JsonSerialization.mapper.convertValue(responseData.get("issues"), JsonNode.class);
                 } finally {
                     EntityUtils.consumeQuietly(response.getEntity());
                 }
             }
         } catch (Exception e) {
-            ServicesLogger.LOGGER.recaptchaFailed(e);
-        }*/
-        return success;
+            logger.error(e.getMessage());
+            return false;
+        }
+
+        // 11. Check the response
+        if (valid && verificationSignature.equals(mosparoVerificationSignature) && verifiedFields != null) {
+            Set<String> verifiedFieldKeys = new HashSet<>();
+            for (Iterator<String> it = verifiedFields.fieldNames(); it.hasNext(); ) {
+                verifiedFieldKeys.add(it.next());
+            }
+
+            Set<String> diffHashedFormData = new HashSet<>(hashedFormData.keySet());
+            diffHashedFormData.removeAll(verifiedFieldKeys);
+            verifiedFieldKeys.removeAll(hashedFormData.keySet());
+
+            if (!diffHashedFormData.isEmpty() || !verifiedFieldKeys.isEmpty()) {
+                return false;
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     private static String convertBytesToHex(byte[] hash) {
@@ -231,6 +314,35 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
         }
 
         return hexString.toString();
+    }
+
+    private String calculateHmacSignature(String data, String privateKey) throws NoSuchAlgorithmException, InvalidKeyException {
+        if (mHmacSha256 == null) {
+            SecretKeySpec key = new SecretKeySpec(privateKey.getBytes(StandardCharsets.UTF_8), "HmacSHA256");
+            mHmacSha256 = Mac.getInstance("HmacSHA256");
+            mHmacSha256.init(key);
+        }
+
+        return Hex.encodeHexString(mHmacSha256.doFinal(data.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private List<NameValuePair> convertToNameValuePar(Map<String, Object> requestData) {
+        List<NameValuePair> data = new LinkedList<>();
+        for (String key : requestData.keySet()) {
+            Object value = requestData.get(key);
+
+            if (Objects.equals(key, "formData") && value instanceof HashMap) {
+                Map<String, String> list = (HashMap<String, String>) value;
+                for (String subKey : list.keySet()) {
+                    String subValue = list.get(subKey);
+                    data.add(new BasicNameValuePair(key + "[" + subKey + "]", subValue));
+                }
+            } else {
+                data.add(new BasicNameValuePair(key, (String) value));
+            }
+        }
+
+        return data;
     }
 
     @Override
