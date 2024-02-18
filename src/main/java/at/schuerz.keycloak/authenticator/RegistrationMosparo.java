@@ -159,7 +159,7 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
     }
 
     private String getMosparoHostname(AuthenticatorConfigModel config) {
-        return config.getConfig().get(MOSPARO_HOST);
+        return "https://" + config.getConfig().get(MOSPARO_HOST);
     }
 
     protected boolean verifyFormData(ValidationContext context, MultivaluedMap<String, String> formData) throws NoSuchAlgorithmException, IOException, InvalidKeyException {
@@ -184,7 +184,7 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
                 continue;
             }
 
-            String value = entry.getValue().getFirst();
+            String value = entry.getValue().get(0);
             preparedFormData.put(entry.getKey(), value.replace("\r\n", "\n"));
         }
 
