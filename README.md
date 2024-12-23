@@ -44,7 +44,7 @@ To show the hCaptcha you need to modify the registration template. You can find 
             window.onload = function(){
                 m = new mosparo(
                    'mosparo-box', 
-                   '${mosparoHost}', 
+                   location.protocol + '//${mosparoHost}',
                    '${mosparoUuid}',
                    '${mosparoPublicKey}', 
                    { loadCssResource: true }
