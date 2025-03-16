@@ -14,9 +14,11 @@ There are a few steps you need to perform in the Keycloak Admin Console. Click t
 
 Registration Flow
 ![Step 1](img/step-01.png)
-Make copy of the Registration flow, and add the mosparo execution to the Registration Form.
+Make copy of the Registration flow, and add the `mosparo` execution to the Registration Form.
 
-mosparoCaptcha Registration Flow
+![Step 1a](img/step-01a.png)
+
+mosparo Registration Flow
 ![Step 2](img/step-02.png)
 Set the 'mosparo' requirement to Required by clicking the appropriate radio button. This will enable mosparoCaptcha on the screen. Next, you have to enter in the mosparo site key and secret that you generated at your mosparo Website. Click on the 'Actions' button that is to the right of the mosparo flow entry, then "Config" link, and enter in the mosparo site key and secret on this config page.
 
