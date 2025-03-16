@@ -1,13 +1,10 @@
-# THIS IS A FIRST SHOT AND NOT WORKING!!!
 Just a fork from keycloak-hcaptcha to be modified for mosparo
 
-# ADVISORY: DO NOT USE THIS NOW!!!
-
-# keycloak-hcaptcha
+# keycloak-mosparo
 
 > I am currently not adding any new features, updates or fixes. Feel free to open a PR!
 
-To safeguard registration against bots, Keycloak has integration with Google reCAPTCHA. This provides similar functionality, but with a more privacy friendly provider named hCaptcha. The code is based on the vanilla implementation of reCAPTCHA in Keycloak.
+To safeguard registration against bots, Keycloak has integration with Google reCAPTCHA. This provides similar functionality, but with a more privacy friendly provider named mosparo. The code is based on the vanilla implementation of reCAPTCHA in Keycloak.
 
 ## Installation
 
@@ -17,21 +14,25 @@ There are a few steps you need to perform in the Keycloak Admin Console. Click t
 
 Registration Flow
 ![Step 1](img/step-01.png)
-Make copy of the Registration flow, and add the hCaptcha execution to the Registration Form.
+Make copy of the Registration flow, and add the mosparo execution to the Registration Form.
 
-hCaptcha Registration Flow
+mosparoCaptcha Registration Flow
 ![Step 2](img/step-02.png)
-Set the 'hCaptcha' requirement to Required by clicking the appropriate radio button. This will enable hCaptcha on the screen. Next, you have to enter in the hCaptcha site key and secret that you generated at the hCaptcha.com Website. Click on the 'Actions' button that is to the right of the hCaptcha flow entry, then "Config" link, and enter in the hCaptcha site key and secret on this config page.
+Set the 'mosparo' requirement to Required by clicking the appropriate radio button. This will enable mosparoCaptcha on the screen. Next, you have to enter in the mosparo site key and secret that you generated at your mosparo Website. Click on the 'Actions' button that is to the right of the mosparo flow entry, then "Config" link, and enter in the mosparo site key and secret on this config page.
 
-hCaptcha Config Page
+mosparo Config Page
 ![Step 3](img/step-03.png)
 
-Now you have to do is to change some default HTTP response headers that Keycloak sets. Keycloak will prevent a website from including any login page within an iframe. This is to prevent clickjacking attacks. You need to authorize hCaptcha to use the registration page within an iframe. Go to the Realm Settings left menu item and then go to the Security Defenses tab. You will need to add https://newassets.hcaptcha.com to the value of the Content-Security-Policy headers. In the image they are also in the X-Frame-Options, but this is not needed (you can ignore it).
+Now you have to do is to change some default HTTP response headers that Keycloak sets. Keycloak will prevent a website from including any login page within an iframe. This is to prevent clickjacking attacks. You need to authorize mosparo to use the registration page within an iframe. Go to the Realm Settings left menu item and then go to the Security Defenses tab. You will need to add https://<your.mosparo.instance.tld> to the value of the Content-Security-Policy headers. In the image they are also in the X-Frame-Options, but this is not needed (you can ignore it).
 
 Authorizing Iframes
 ![Step 4](img/step-04.png)
 
-To show the hCaptcha you need to modify the registration template. You can find the files in your Keycloak installation under `themes/base/login/`. If you use the user profile preview (you start your Keycloak with the `-Dkeycloak.profile=preview` flag), you need to edit the `register-user-profile.ftl`, else the `register.ftl`. Add the following code beneith the reCaptcha code:
+To show the mosparoCaptcha you need to modify the registration template. 
+To modify the theme, you have to modify the register.ftl file in a jar-file unter lib/lib/main/org.keycloak.keycloak-themes-<keycloak-version>.jar. You can unzip the jar, edit the file and repack it again. It also works to edit it directly with vim.
+
+You can find the files in in the jar under `themes/base/login/` and `theme/keycloak.v2/login/register.ftl` 
+Add the following code beneith the reCaptcha code:
 
 ```html
 <#if mosparoRequired??>
@@ -44,7 +45,7 @@ To show the hCaptcha you need to modify the registration template. You can find 
             window.onload = function(){
                 m = new mosparo(
                    'mosparo-box', 
-                   '${mosparoHost}', 
+                   'https://${mosparoHost}', 
                    '${mosparoUuid}',
                    '${mosparoPublicKey}', 
                    { loadCssResource: true }
@@ -55,11 +56,13 @@ To show the hCaptcha you need to modify the registration template. You can find 
 </div>
 </#if>
 ```
+since a few keycloak versions the `https://` before `${mosparoHost}` is needed. Without mosparo will be called as suburl unter login-actions from your keycloak-domain. Ideas for fixes are welcome.
 
 Registration Template
+
 ![Step 5](img/step-05.png)
 
-In the last step you have to change the registration flow to the newly created one and save. Once you do this, the hCaptcha shows on the registration page and protects your site from bots!
+In the last step you have to change the registration flow to the newly created one and save. Once you do this, the mosparoCaptcha shows on the registration page and protects your site from bots!
 
 Authentication Bindings
 ![Step 6](img/step-06.png)
@@ -69,7 +72,7 @@ Authentication Bindings
 Clone the repository:
 
 ```bash
-git clone https://github.com/p08dev/keycloak-hcaptcha.git
+git clone https://git.schuerz.at/jakob/keycloak-mosparo.git
 ```
 
 Inside the repository, compile it using Maven with Java 17:
