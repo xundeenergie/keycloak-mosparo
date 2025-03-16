@@ -45,7 +45,7 @@ Add the following code beneith the reCaptcha code:
             window.onload = function(){
                 m = new mosparo(
                    'mosparo-box', 
-                   location.protocol + '//${mosparoHost}',
+                   'https://${mosparoHost}',
                    '${mosparoUuid}',
                    '${mosparoPublicKey}', 
                    { loadCssResource: true }
