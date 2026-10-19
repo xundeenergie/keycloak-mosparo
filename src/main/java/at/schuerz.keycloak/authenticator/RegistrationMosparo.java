@@ -79,6 +79,7 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
     public static final String MOSPARO_UUID = "uuid";
     public static final String MOSPARO_PUBLIC_KEY = "mosparo-public-key";
     public static final String MOSPARO_PRIVATE_KEY = "mosparo-private-key";
+    public static final String MOSPARO_IGNORED_FIELDS = "mosparo-ignored-fields";
     public static final String MOSPARO_VERIFY_SSL = "mosparo-verify-ssl";
 
     private static final Logger logger = Logger.getLogger(RegistrationMosparo.class);
@@ -168,10 +169,17 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
         AuthenticatorConfigModel captchaConfig = context.getAuthenticatorConfig();
         String publicKey = captchaConfig.getConfig().get(MOSPARO_PUBLIC_KEY);
         String privateKey = captchaConfig.getConfig().get(MOSPARO_PRIVATE_KEY);
+        String[] ignoredFields = captchaConfig.getConfig().get(MOSPARO_IGNORED_FIELDS).split("##");
 
         // 1. Remove the ignored fields from the form data
         formData.remove("password");
         formData.remove("password-confirm");
+
+        for(String ignoredField : ignoredFields) {
+            if (formData.remove(ignoredField) != null) {
+                logger.debug("Removing ignored field: " + ignoredField);
+            }
+        }
 
         // 2. Extract the submit and validation token from the form data
         String mosparoSubmitToken = formData.getFirst("_mosparo_submitToken");
@@ -432,6 +440,13 @@ public class RegistrationMosparo implements FormAction, FormActionFactory {
         property.setLabel("mosparo Private Key");
         property.setType(ProviderConfigProperty.STRING_TYPE);
         property.setHelpText("mosparo Private Key");
+        CONFIG_PROPERTIES.add(property);
+
+        property = new ProviderConfigProperty();
+        property.setName(MOSPARO_IGNORED_FIELDS);
+        property.setLabel("Ignored fields");
+        property.setType(ProviderConfigProperty.MULTIVALUED_STRING_TYPE);
+        property.setHelpText("List of form fields to ignore when checking the mosparo result");
         CONFIG_PROPERTIES.add(property);
 
         property = new ProviderConfigProperty();
